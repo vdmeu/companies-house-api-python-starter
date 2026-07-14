@@ -1,50 +1,74 @@
-# registrum-python
+# companies-house-api-python-starter
 
-Python starter kit for the [Registrum API](https://registrum.co.uk) -- structured UK company data built on Companies House.
+A Python starter kit for the [UK Companies House REST API](https://developer.company-information.service.gov.uk) -- the free, official register of every UK company. This repo covers the three things that trip almost everyone up on their first integration:
+
+- **Auth** -- CH uses HTTP Basic Auth with your key as the username, not a bearer token or `X-API-Key` header
+- **Rate limits** -- 600 requests per 5-minute rolling window, with a `429` + `Retry-After` you need to respect
+- **iXBRL vs PDF** -- filed accounts are only sometimes structured data; a lot of the time they're a flat PDF with nothing to parse
+
+One file, no framework, nothing to configure beyond an API key.
+
+## Get an API key
+
+Free, official, no credit card: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk). Register an application, generate a REST API key, and you're in -- usually approved within minutes.
 
 ## Quick start
 
 ```bash
-pip install requests
+pip install -r requirements.txt
+export CH_API_KEY=your_key_here
+python example.py
 ```
 
 ```python
 import requests
 
-API_KEY = "reg_live_YOUR_KEY_HERE"
-BASE_URL = "https://api.registrum.co.uk/v1"
-
-res = requests.get(
-    f"{BASE_URL}/company/00445790",
-    headers={"X-API-Key": API_KEY},
+# The auth gotcha: your API key is the HTTP Basic Auth *username*.
+# The password is left empty. This is not a bearer token.
+response = requests.get(
+    "https://api.company-information.service.gov.uk/company/00445790",
+    auth=(CH_API_KEY, ""),
 )
-print(res.json())
+print(response.json()["company_name"])  # TESCO PLC
 ```
 
-## Get an API key
+## The gotchas, in detail
 
-Free tier: 50 calls/month, no credit card required.
+### 1. Auth is Basic Auth, not a header
 
-Not ready for a key? Browse 10 live companies/day at [registrum.co.uk](https://registrum.co.uk) -- no sign-up needed.
+Most REST APIs today use `Authorization: Bearer <token>` or a custom header. Companies House predates that convention -- your key goes in as the HTTP Basic Auth username with an empty password:
 
--> [registrum.co.uk/#get-key](https://registrum.co.uk/#get-key)
+```python
+requests.get(url, auth=(api_key, ""))
+```
 
-## What you get
+Sending it as `X-API-Key` or `Authorization: Bearer <key>` returns a `401` that doesn't tell you what you did wrong.
 
-The Registrum API enriches raw Companies House data with:
+### 2. Rate limits: 600 req / 5 min, and you need to back off correctly
 
-- **Structured financials** -- turnover, net assets, employees, YoY comparisons in clean GBP values
-- **Director networks** -- 2-degree board traversal to find connected entities
-- **PSC / beneficial ownership** -- nature-of-control breakdown, cessation dates
-- **ECCTA compliance flags** -- identity verification status per director
-- **Batch enrichment** -- enrich multiple companies in one request
-- **Intelligent caching** -- 24h company data, 7-day financials, resilient during CH outages
-- **Fuzzy search** -- company name to enriched profile in one call
+Each key is capped at 600 requests per rolling 5-minute window. Exceed it and you get a `429` with a `Retry-After` header telling you how many seconds to wait. `example.py`'s `request_with_backoff()` reads that header instead of guessing a fixed sleep time -- guessing wrong either wastes time or gets you rate-limited again immediately.
 
-## API reference
+### 3. Pagination uses `start_index`, not a page number
 
-Full documentation: [api.registrum.co.uk/docs](https://api.registrum.co.uk/docs)
+Officer, PSC, and filing-history endpoints return `items`, `items_per_page`, `start_index`, and `total_results`. There's no `page=2` parameter -- you increment `start_index` by your page size and stop when it reaches `total_results`. Code that only reads the first page will silently drop officers on any company with a long appointment history.
+
+### 4. Filed accounts are metadata first, document second -- and often a plain PDF
+
+`filing-history` tells you a set of accounts was filed and links to a `document_metadata` URL. That metadata lists which content types are actually available for that filing, under `resources`. This is the step people skip -- and it matters, because a large share of UK companies (small companies and micro-entities in particular) file accounts as flat, sometimes scanned, PDFs with **no structured iXBRL data at all**. If you build a parser assuming iXBRL will always be there, it'll work in testing on large companies and then silently fail across most of your real dataset. Check `resources` first; don't find out from a parse failure three steps downstream.
+
+`get_latest_accounts_status()` in `example.py` shows the full check.
+
+## Beyond the raw API
+
+This repo is a thin, honest wrapper around the official CH API -- it doesn't hide any of the above, it just handles it correctly. If you'd rather not deal with iXBRL parsing, pagination loops, and your own caching layer at all, [Registrum](https://registrum.co.uk) sits on top of the same official data and returns:
+
+- Structured financials already parsed out of iXBRL (or a clear `data_quality` reason when a company's accounts are PDF-only)
+- Director networks traversed to 2 degrees in one call
+- PSC / beneficial ownership decoded to plain English
+- Built-in caching, so you rarely hit the 600 req/5min ceiling in the first place
+
+Free tier, no credit card: [registrum.co.uk](https://registrum.co.uk) -- 50 calls/month, or browse without a key at all.
 
 ## License
 
-Examples in this repo are MIT licensed. Data is sourced under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+Code in this repo is MIT licensed. Companies House data is published under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
